@@ -26,6 +26,15 @@
 #include "ns3/config-store.h"
 #include <ns3/buildings-helper.h>
 #include <ns3/packet.h>
+
+#include "ns3/applications-module.h"
+
+
+#include "ns3/lte-helper.h"
+#include "ns3/epc-helper.h"
+#include "ns3/ipv4-global-routing-helper.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-helper.h"
 //#include "ns3/gtk-config-store.h"
 
 using namespace ns3;
@@ -45,6 +54,18 @@ int main (int argc, char *argv[])
   // to load a previously created default attribute file
   // ./waf --command-template="%s --ns3::ConfigStore::Filename=input-defaults.txt --ns3::ConfigStore::Mode=Load --ns3::ConfigStore::FileFormat=RawText" --run src/lte/examples/lena-first-sim
 
+  /*
+    Enables Printing of Packet MetaData for Packet Information
+  */ 
+  std::cout << "Packet Metadata Tracing Enabled" << std::endl;
+  Packet::EnablePrinting(); 
+
+  Ptr<LteHelper> lteHelper = CreateObject<LteHelper> ();
+
+  Ptr<PointToPointEpcHelper>  epcHelper = CreateObject<PointToPointEpcHelper> ();
+  lteHelper->SetEpcHelper (epcHelper);
+
+
   ConfigStore inputConfig;
   inputConfig.ConfigureDefaults ();
 
@@ -59,13 +80,34 @@ int main (int argc, char *argv[])
      Config::SetDefault ("ns3::LteHelper::EnbComponentCarrierManager", StringValue ("ns3::RrComponentCarrierManager"));
    }
 
-  /*
-    Enables Printing of Packet MetaData for Packet Information
-  */ 
-  std::cout << "Packet Metadata Tracing Enabled" << std::endl;
-  Packet::EnablePrinting(); 
+  Ptr<Node> pgw = epcHelper->GetPgwNode ();
 
-  Ptr<LteHelper> lteHelper = CreateObject<LteHelper> ();
+  // Create a single RemoteHost
+  NodeContainer remoteHostContainer;
+  remoteHostContainer.Create (1);
+  Ptr<Node> remoteHost = remoteHostContainer.Get (0);
+  InternetStackHelper internet;
+  internet.Install (remoteHostContainer);
+
+
+  // Create the Internet
+  PointToPointHelper p2ph;
+  p2ph.SetDeviceAttribute ("DataRate", DataRateValue (DataRate ("100Gb/s")));
+  p2ph.SetDeviceAttribute ("Mtu", UintegerValue (1500));
+  p2ph.SetChannelAttribute ("Delay", TimeValue (Seconds (0.010)));
+  NetDeviceContainer internetDevices = p2ph.Install (pgw, remoteHost);
+  Ipv4AddressHelper ipv4h;
+  ipv4h.SetBase ("1.0.0.0", "255.0.0.0");
+  Ipv4InterfaceContainer internetIpIfaces = ipv4h.Assign (internetDevices);
+  // interface 0 is localhost, 1 is the p2p device
+  Ipv4Address remoteHostAddr = internetIpIfaces.GetAddress (1);
+
+  std::cout << "The remote Host address is: " << remoteHostAddr << std::endl;
+
+  Ipv4StaticRoutingHelper ipv4RoutingHelper;
+  Ptr<Ipv4StaticRouting> remoteHostStaticRouting = ipv4RoutingHelper.GetStaticRouting (remoteHost->GetObject<Ipv4> ());
+  remoteHostStaticRouting->AddNetworkRouteTo (Ipv4Address ("7.0.0.0"), Ipv4Mask ("255.0.0.0"), 1);
+
 
   // Uncomment to enable logging
   //  lteHelper->EnableLogComponents ();
@@ -94,6 +136,19 @@ int main (int argc, char *argv[])
   enbDevs = lteHelper->InstallEnbDevice (enbNodes);
   ueDevs = lteHelper->InstallUeDevice (ueNodes);
 
+
+  // Install the IP stack on the UEs
+  internet.Install (ueNodes);
+  Ipv4InterfaceContainer ueIpIface;
+  ueIpIface = epcHelper->AssignUeIpv4Address (NetDeviceContainer (ueDevs));
+  // Assign IP address to UEs, and install applications
+  for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+  {
+    Ptr<Node> ueNode = ueNodes.Get (u);
+    // Set the default gateway for the UE
+    Ptr<Ipv4StaticRouting> ueStaticRouting = ipv4RoutingHelper.GetStaticRouting (ueNode->GetObject<Ipv4> ());
+    ueStaticRouting->SetDefaultRoute (epcHelper->GetUeDefaultGatewayAddress (), 1);
+  }
   // ueDevs holds a LTE Net Device
   // Ptr<NetDevice> ueDevice1 = ueDevs.Get(0);
 
@@ -108,16 +163,17 @@ int main (int argc, char *argv[])
   lteHelper->Attach (ueDevs, enbDevs.Get (0));
 
   // Activate a data radio bearer
-  enum EpsBearer::Qci q = EpsBearer::GBR_CONV_VOICE;
-  EpsBearer bearer (q);
-  lteHelper->ActivateDataRadioBearer (ueDevs, bearer);
+  // enum EpsBearer::Qci q = EpsBearer::GBR_CONV_VOICE;
+  // EpsBearer bearer (q);
+  // lteHelper->ActivateDataRadioBearer (ueDevs, bearer);
+
   lteHelper->EnableTraces ();
 
-  Simulator::Stop (Seconds (0.05));
+  
 
   std::cout << "Simulator Beginning" << std::endl;
 
-  Simulator::Run ();
+
 
   // GtkConfigStore config;
   // config.ConfigureAttributes ();
@@ -126,6 +182,7 @@ int main (int argc, char *argv[])
   Ptr<LteUePhy> phyUE1 = ueLteDevice1->GetPhy();
   std::cout << "Printing Cache Vector Device 1" << std::endl;
   phyUE1->printCacheVector();
+
   // Access the Cache Vector of the First UE Device
   // std::vector<Ptr<Packet>> cacheVector1 = phyUE1->getPhyCacheVector();
   // std::cout << "Cache Vector 1 Size: " << cacheVector1.size() << std::endl;
@@ -136,18 +193,36 @@ int main (int argc, char *argv[])
   phyUE2->printCacheVector();
 
   // Establish Link Protocol Between the UE Devices
+  std::cout << "Address of UE Net Device 1: " << ueLteDevice1->GetAddress() << std::endl;
+  std::cout << "Address of UE Net Device 2: " << ueLteDevice2->GetAddress() << std::endl;
+
+  // Generate Traffic using OnOffApplication Helper
+  OnOffHelper clientHelper ("ns3::TcpSocketFactory", Address ());
+  clientHelper.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1]"));
+  clientHelper.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+
+  //normally wouldn't need a loop here but the server IP address is different
+  //on each p2p subnet
+  ApplicationContainer clientApps;
+
+  uint16_t port = 50000;
+
+  AddressValue remoteAddress (InetSocketAddress (remoteHostAddr, port));
+  clientHelper.SetAttribute ("Remote", remoteAddress);
+  clientApps.Add (clientHelper.Install (ueNodes.Get(1)));
+  clientApps.Start (Seconds (1.0));
+  clientApps.Stop (Seconds (10.0));
 
 
-  // Generate VBR Traffic using OnOffApplication Helper
-
-  // OnOffHelper onoff ("ns3::UdpSocketFactory", InetSocketAddress(serverAddr,9));
-  // onoff.SetAttribute("OnTime", StringValue("ns3::ConstantRandomVariable[Constant=1]"));
-  // onoff.SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=0]"));
-  // onoff.SetConstantRate(DataRate("4Mbps"), packetSize);
-
+  AsciiTraceHelper ascii;
+  p2ph.EnableAsciiAll (ascii.CreateFileStream ("d2dtracing.tr"));
+  p2ph.EnablePcapAll ("d2dtracing");
   // Access the Cache Vector of the Second UE Device
   // std::vector<Ptr<Packet>> cacheVector2 = phyUE2->getPhyCacheVector();
   // std::cout << "Cache Vector 2 Size: " << cacheVector2.size() << std::endl;
+  Simulator::Stop (Seconds (10));
+
+  Simulator::Run ();
 
   Simulator::Destroy ();
 
