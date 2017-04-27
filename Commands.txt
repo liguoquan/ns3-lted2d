@@ -1,0 +1,6 @@
+Key Commands
+=============
+./waf --run scratch/d2d-simulation
+
+Run NetAnim by opening generated XML File
+==========================================
